@@ -1,0 +1,251 @@
+name: "FixSense — AI Test Failure Analysis"
+description: "Analyze CI test failures with AI. Detect app bugs vs test bugs, get root cause analysis and fix suggestions."
+author: "CopilotMe"
+
+branding:
+  icon: "zap"
+  color: "green"
+
+inputs:
+  api-key:
+    description: "FixSense API key (get from https://fix-sense.vercel.app/settings)"
+    required: true
+  results-path:
+    description: "Path to test results directory (JUnit XML files)"
+    required: false
+    default: "test-results/"
+  post-comment:
+    description: "Post analysis as PR comment (true/false)"
+    required: false
+    default: "true"
+  api-url:
+    description: "FixSense API URL (override for self-hosted)"
+    required: false
+    default: "https://fix-sense.vercel.app"
+
+outputs:
+  analyses:
+    description: "JSON array of analysis results"
+    value: ${{ steps.analyze.outputs.analyses }}
+  failure-count:
+    description: "Number of failures analyzed"
+    value: ${{ steps.analyze.outputs.failure_count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse test results and analyze failures
+      id: analyze
+      shell: bash
+      env:
+        FIXSENSE_API_KEY: ${{ inputs.api-key }}
+        FIXSENSE_API_URL: ${{ inputs.api-url }}
+        RESULTS_PATH: ${{ inputs.results-path }}
+        POST_COMMENT: ${{ inputs.post-comment }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        # ── Parse JUnit XML for failures ──────────────────────────
+        FAILURES_JSON="[]"
+        FAILURE_COUNT=0
+
+        if [ ! -d "$RESULTS_PATH" ]; then
+          echo "⚠️ Results directory not found: $RESULTS_PATH"
+          echo "analyses=[]" >> "$GITHUB_OUTPUT"
+          echo "failure_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "🔍 Scanning $RESULTS_PATH for test results..."
+
+        # Find JUnit XML files
+        JUNIT_FILES=$(find "$RESULTS_PATH" -name "*.xml" -type f 2>/dev/null || true)
+
+        if [ -z "$JUNIT_FILES" ]; then
+          echo "⚠️ No JUnit XML files found in $RESULTS_PATH"
+          echo "analyses=[]" >> "$GITHUB_OUTPUT"
+          echo "failure_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Parse failures from JUnit XML using Node.js (available on all runners)
+        FAILURES_JSON=$(node -e "
+        const fs = require('fs');
+        const path = require('path');
+
+        const files = '${JUNIT_FILES}'.split('\n').filter(Boolean);
+        const failures = [];
+
+        for (const file of files) {
+          const xml = fs.readFileSync(file, 'utf8');
+
+          // Match failed testcases with failure messages
+          const testcaseRegex = /<testcase[^>]*name=\"([^\"]+)\"[^>]*classname=\"([^\"]+)\"[^>]*>[\s\S]*?<failure[^>]*(?:message=\"([^\"]*?)\")?[^>]*>([\s\S]*?)<\/failure>/g;
+          let match;
+
+          while ((match = testcaseRegex.exec(xml)) !== null) {
+            const testName = match[2] + ' > ' + match[1];
+            const errorMessage = (match[3] || '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'\"');
+            const stackTrace = (match[4] || '').trim().replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+
+            failures.push({ testName, errorMessage: errorMessage || stackTrace.slice(0, 500), stackTrace });
+          }
+
+          // Also match <testcase> with <error> tags
+          const errorRegex = /<testcase[^>]*name=\"([^\"]+)\"[^>]*classname=\"([^\"]+)\"[^>]*>[\s\S]*?<error[^>]*(?:message=\"([^\"]*?)\")?[^>]*>([\s\S]*?)<\/error>/g;
+          while ((match = errorRegex.exec(xml)) !== null) {
+            const testName = match[2] + ' > ' + match[1];
+            const errorMessage = (match[3] || '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'\"');
+            const stackTrace = (match[4] || '').trim().replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+
+            failures.push({ testName, errorMessage: errorMessage || stackTrace.slice(0, 500), stackTrace });
+          }
+        }
+
+        console.log(JSON.stringify(failures));
+        " 2>/dev/null) || FAILURES_JSON="[]"
+
+        FAILURE_COUNT=$(echo "$FAILURES_JSON" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); console.log(JSON.parse(d).length)")
+
+        if [ "$FAILURE_COUNT" -eq 0 ]; then
+          echo "✅ No test failures found — all tests passed!"
+          echo "analyses=[]" >> "$GITHUB_OUTPUT"
+          echo "failure_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "🔴 Found $FAILURE_COUNT test failure(s). Analyzing with FixSense..."
+
+        # ── Send each failure to FixSense API ─────────────────────
+        ANALYSES="[]"
+        REPO="${{ github.repository }}"
+        RUN_ID="${{ github.run_id }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+
+        ANALYSES=$(echo "$FAILURES_JSON" | node -e "
+        const https = require('https');
+        const http = require('http');
+
+        const stdin = require('fs').readFileSync('/dev/stdin', 'utf8');
+        const failures = JSON.parse(stdin);
+        const apiUrl = process.env.FIXSENSE_API_URL;
+        const apiKey = process.env.FIXSENSE_API_KEY;
+        const repo = '${REPO}';
+        const runId = parseInt('${RUN_ID}') || 0;
+        const prNumber = parseInt('${PR_NUMBER}') || 0;
+
+        async function analyze(failure) {
+          const body = JSON.stringify({
+            testName: failure.testName,
+            errorMessage: failure.errorMessage,
+            stackTrace: failure.stackTrace || null,
+            repoFullName: repo,
+            runId: runId,
+            prNumber: prNumber,
+          });
+
+          return new Promise((resolve) => {
+            const url = new URL(apiUrl + '/api/v1/analyze');
+            const mod = url.protocol === 'https:' ? https : http;
+            const req = mod.request(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey,
+                'Content-Length': Buffer.byteLength(body),
+              },
+            }, (res) => {
+              let data = '';
+              res.on('data', c => data += c);
+              res.on('end', () => {
+                try {
+                  const parsed = JSON.parse(data);
+                  resolve({ testName: failure.testName, ...parsed.analysis, status: 'success' });
+                } catch {
+                  resolve({ testName: failure.testName, status: 'error', error: data.slice(0, 200) });
+                }
+              });
+            });
+            req.on('error', (e) => resolve({ testName: failure.testName, status: 'error', error: e.message }));
+            req.write(body);
+            req.end();
+          });
+        }
+
+        (async () => {
+          // Analyze up to 10 failures (avoid API abuse)
+          const batch = failures.slice(0, 10);
+          const results = [];
+          for (const f of batch) {
+            const r = await analyze(f);
+            results.push(r);
+          }
+          console.log(JSON.stringify(results));
+        })();
+        ")
+
+        echo "analyses=$ANALYSES" >> "$GITHUB_OUTPUT"
+        echo "failure_count=$FAILURE_COUNT" >> "$GITHUB_OUTPUT"
+
+        # ── Post PR comment ───────────────────────────────────────
+        if [ "$POST_COMMENT" = "true" ] && [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "0" ]; then
+          echo "💬 Posting analysis comment to PR #$PR_NUMBER..."
+
+          COMMENT_BODY=$(echo "$ANALYSES" | node -e "
+          const stdin = require('fs').readFileSync('/dev/stdin', 'utf8');
+          const analyses = JSON.parse(stdin);
+
+          let md = '<!-- fixsense-action -->\n## 🔍 FixSense Analysis\n\n';
+          md += '| Test | Root Cause | Flakiness | Confidence |\n';
+          md += '|------|-----------|-----------|------------|\n';
+
+          for (const a of analyses) {
+            if (a.status !== 'success') continue;
+            const flaky = a.flakynessScore >= 70 ? '🟡 ' + a.flakynessScore : a.flakynessScore >= 30 ? '🟠 ' + a.flakynessScore : '🔴 ' + a.flakynessScore;
+            const conf = a.confidence === 'high' ? '🟢' : a.confidence === 'medium' ? '🟡' : '🔴';
+            const name = a.testName.length > 50 ? '...' + a.testName.slice(-47) : a.testName;
+            md += '| \`' + name + '\` | ' + (a.rootCause || '').slice(0, 100) + ' | ' + flaky + ' | ' + conf + ' ' + a.confidence + ' |\n';
+          }
+
+          md += '\n---\n';
+
+          for (const a of analyses) {
+            if (a.status !== 'success') continue;
+            md += '<details><summary>📋 <b>' + a.testName + '</b></summary>\n\n';
+            md += '**Root Cause:** ' + (a.rootCause || 'N/A') + '\n\n';
+            md += '**Suggested Fix:** ' + (a.suggestedFix || 'N/A') + '\n\n';
+            md += '**Related Change:** ' + (a.diffHint || 'N/A') + '\n\n';
+            md += '</details>\n\n';
+          }
+
+          md += '\n<sub>Powered by [FixSense](https://fix-sense.vercel.app) — AI-powered CI failure analysis</sub>';
+
+          console.log(md);
+          ")
+
+          # Use GitHub API to post/update comment
+          EXISTING_COMMENT_ID=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+            | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const c=JSON.parse(d).find(c=>c.body.includes('fixsense-action'));console.log(c?c.id:'')" 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_COMMENT_ID" ]; then
+            curl -s -X PATCH \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_COMMENT_ID" \
+              -d "$(node -e "console.log(JSON.stringify({body: require('fs').readFileSync('/dev/stdin','utf8')}))" <<< "$COMMENT_BODY")" > /dev/null
+            echo "✅ Updated existing PR comment"
+          else
+            curl -s -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+              -d "$(node -e "console.log(JSON.stringify({body: require('fs').readFileSync('/dev/stdin','utf8')}))" <<< "$COMMENT_BODY")" > /dev/null
+            echo "✅ Posted analysis comment to PR #$PR_NUMBER"
+          fi
+        fi
+
+        echo ""
+        echo "🏁 FixSense analysis complete: $FAILURE_COUNT failure(s) analyzed"
