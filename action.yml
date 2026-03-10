@@ -1,5 +1,5 @@
 name: "FixSense — AI Test Failure Analysis"
-description: "Analyze CI test failures with AI. Detect app bugs vs test bugs, get root cause analysis and fix suggestions."
+description: "AI-powered CI test failure analysis for Playwright, Cypress, Jest, pytest. Root cause detection, flaky test scoring, app bug vs test bug classification, and fix suggestions — posted as PR comments."
 author: "CopilotMe"
 
 branding:

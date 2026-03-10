@@ -1,16 +1,26 @@
 # FixSense — AI Test Failure Analysis
 
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-FixSense-green?logo=github)](https://github.com/marketplace/actions/fixsense-ai-test-failure-analysis)
+[![Playwright](https://img.shields.io/badge/Playwright-supported-brightgreen?logo=playwright)](https://playwright.dev)
+[![Cypress](https://img.shields.io/badge/Cypress-supported-brightgreen?logo=cypress)](https://cypress.io)
+[![Jest](https://img.shields.io/badge/Jest-supported-brightgreen?logo=jest)](https://jestjs.io)
+[![pytest](https://img.shields.io/badge/pytest-supported-brightgreen?logo=python)](https://pytest.org)
 
-Analyze CI test failures with AI. Detect **app bugs vs test bugs**, get root cause analysis and actionable fix suggestions — directly in your PR.
+**Stop debugging CI failures manually.** FixSense analyzes your failing tests with AI, explains the root cause, classifies app bugs vs test bugs, scores flakiness, and suggests fixes — all as a PR comment.
 
-## Features
+> Works with any test framework that produces JUnit XML reports.
 
-- **Root Cause Analysis** — AI explains why your test failed in 2-4 sentences
-- **App Bug vs Test Bug** — Distinguishes application bugs from test assertion errors
-- **Flakiness Score** — 0-100 score indicating if the failure is likely flaky
-- **Fix Suggestions** — Actionable steps to fix the failing test
-- **PR Comments** — Automatic analysis posted as a PR comment
+## What You Get
+
+For every failing test, FixSense provides:
+
+| Feature | Description |
+|---------|-------------|
+| **Root Cause** | AI explains *why* your test failed in 2-4 sentences |
+| **App Bug vs Test Bug** | Is your application broken or just the test? |
+| **Flakiness Score** | 0-100 score — high means likely flaky, not a real regression |
+| **Suggested Fix** | Actionable steps to resolve the failure |
+| **PR Comment** | All results posted as a single, auto-updating PR comment |
 
 ## Quick Start
 
@@ -18,17 +28,20 @@ Add to your workflow **after** your test step:
 
 ```yaml
 - name: Run tests
+  id: tests
   run: npx playwright test
   continue-on-error: true
 
-- name: Analyze failures
-  if: failure() || steps.tests.outcome == 'failure'
+- name: FixSense Analysis
+  if: steps.tests.outcome == 'failure'
   uses: CopilotMe/fixsense-action@v1
   with:
     api-key: ${{ secrets.FIXSENSE_API_KEY }}
 ```
 
-## Full Example
+That's it. Next time a test fails, you'll get an analysis comment on your PR.
+
+## Full Workflow Example
 
 ```yaml
 name: Tests
@@ -65,11 +78,29 @@ jobs:
           path: test-results/
 ```
 
+## PR Comment Preview
+
+The action posts a summary table with expandable details for each failure:
+
+| Test | Root Cause | Flakiness | Confidence |
+|------|-----------|-----------|------------|
+| `login.spec.ts > should login` | Timeout waiting for selector `.submit-btn` — element no longer exists after recent refactor | 🟡 65 | 🟢 high |
+| `checkout.spec.ts > payment` | HTTP 500 from /api/payment — server error, not a test issue | 🔴 10 | 🟢 high |
+
+<details><summary>Expanded details include:</summary>
+
+- Full root cause explanation
+- Suggested fix with code pointers
+- Related code change (diff hint)
+- Whether it's an app bug or test bug
+
+</details>
+
 ## Inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `api-key` | Yes | — | FixSense API key ([get one](https://fix-sense.vercel.app/settings)) |
+| `api-key` | **Yes** | — | Your FixSense API key ([get one free](https://fix-sense.vercel.app/dashboard/settings)) |
 | `results-path` | No | `test-results/` | Path to JUnit XML test results |
 | `post-comment` | No | `true` | Post analysis as PR comment |
 | `api-url` | No | `https://fix-sense.vercel.app` | API URL (for self-hosted) |
@@ -81,42 +112,43 @@ jobs:
 | `analyses` | JSON array of analysis results |
 | `failure-count` | Number of failures analyzed |
 
-## Supported Frameworks
+## Supported Test Frameworks
 
 Any framework that produces **JUnit XML** reports:
 
-- **Playwright** — `reporter: [['junit', { outputFile: 'test-results/junit.xml' }]]`
-- **Cypress** — `cypress-junit-reporter`
-- **Jest** — `jest-junit`
-- **pytest** — `--junitxml=test-results/junit.xml`
-- **JUnit/TestNG** — native XML output
-
-## How It Works
-
-1. Your tests run and produce JUnit XML results
-2. FixSense parses the XML for failures
-3. Each failure is sent to the FixSense AI for analysis
-4. Results are posted as a PR comment with root cause, fix suggestions, and flakiness score
-
-## PR Comment Preview
-
-The action posts a table with all failures and expandable details:
-
-| Test | Root Cause | Flakiness | Confidence |
-|------|-----------|-----------|------------|
-| `login.spec.ts > should login` | Timeout waiting for selector `.submit-btn` | 🟡 65 | 🟢 high |
+| Framework | Reporter Config |
+|-----------|----------------|
+| **Playwright** | `reporter: [['junit', { outputFile: 'test-results/junit.xml' }]]` |
+| **Cypress** | `cypress-junit-reporter` |
+| **Jest** | `jest-junit` |
+| **pytest** | `--junitxml=test-results/junit.xml` |
+| **JUnit / TestNG** | Native XML output |
+| **Mocha** | `mocha-junit-reporter` |
+| **RSpec** | `rspec_junit_formatter` |
+| **Go** | `go-junit-report` |
 
 ## Get Your API Key
 
 1. Go to [fix-sense.vercel.app](https://fix-sense.vercel.app)
-2. Sign in with GitHub
-3. Copy your API key from Settings
-4. Add it as a repository secret: `FIXSENSE_API_KEY`
+2. Sign in with GitHub or Google
+3. Go to **Settings** and generate your API key
+4. Add it as a repository secret named `FIXSENSE_API_KEY`
+
+Free plan includes **350 analyses/month** — enough for most small-to-mid teams.
+
+## Why FixSense?
+
+- **Saves 10-30 min per failure** — no more scrolling through logs
+- **Catches flaky tests** — high flakiness score = don't block the PR
+- **Distinguishes real bugs** — HTTP 5xx, missing elements, broken flows flagged as app bugs
+- **Works with any CI** — GitHub Actions, self-hosted runners, any JUnit XML producer
+- **Dashboard included** — track failure trends, top flaky tests, auto-fix success rates at [fix-sense.vercel.app](https://fix-sense.vercel.app)
 
 ## Links
 
 - [FixSense Dashboard](https://fix-sense.vercel.app)
 - [Documentation](https://fix-sense.vercel.app/docs)
+- [GitHub App](https://github.com/apps/fix-sense) (zero-config alternative)
 
 ## License
 
